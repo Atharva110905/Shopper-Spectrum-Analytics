@@ -1,0 +1,8 @@
+online_retail.csv
+models/cosine_sim.pkl
+{*}
+assets/
+0]
+__pycache__/
+*.pyc
+.streamlit/
