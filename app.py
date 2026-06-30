@@ -14,9 +14,11 @@ from pathlib import Path
 
 st.set_page_config(page_title="Shopper Spectrum", page_icon="🛒", layout="wide", initial_sidebar_state="expanded")
 
-BASE   = Path(__file__).parent
-DATA   = BASE / "data"
-MODELS = BASE / "models"
+BASE = Path(__file__).parent
+_data_sub   = BASE / "data"
+_models_sub = BASE / "models"
+DATA   = _data_sub   if _data_sub.exists()   else BASE
+MODELS = _models_sub if _models_sub.exists() else BASE
 
 # ══════════════════════════════════════════════════════════════════
 # GLOBAL CSS — Aurora dark theme
@@ -325,9 +327,37 @@ def load_data():
 
 @st.cache_resource
 def load_models():
+    from sklearn.metrics.pairwise import cosine_similarity as _cos_sim
     scaler = pickle.load(open(MODELS/"scaler.pkl","rb"))
     kmeans = pickle.load(open(MODELS/"kmeans.pkl","rb"))
-    cosine = pd.read_pickle(MODELS/"cosine_sim.pkl")
+
+    cosine_path = MODELS/"cosine_sim.pkl"
+    if cosine_path.exists():
+        cosine = pd.read_pickle(cosine_path)
+    else:
+        # Auto-build cosine similarity matrix from raw CSV
+        with st.spinner("⚙️ Building recommendation engine (first run only — ~2 min)..."):
+            import os
+            csv_candidates = [
+                BASE / "online_retail.csv",
+                Path("online_retail.csv"),
+            ]
+            csv_path = next((p for p in csv_candidates if p.exists()), None)
+            if csv_path is None:
+                st.error("online_retail.csv not found. Please upload it to the app folder.")
+                st.stop()
+            df_tmp = pd.read_csv(csv_path, encoding="latin1")
+            df_tmp = df_tmp[~df_tmp["InvoiceNo"].astype(str).str.startswith("C")]
+            df_tmp = df_tmp.dropna(subset=["CustomerID"])
+            df_tmp = df_tmp[df_tmp["Quantity"] > 0]
+            df_tmp = df_tmp[df_tmp["UnitPrice"] > 0]
+            df_tmp["Description"] = df_tmp["Description"].str.strip().str.upper()
+            df_tmp["CustomerID"]  = df_tmp["CustomerID"].astype(int)
+            pivot  = df_tmp.pivot_table(index="CustomerID", columns="Description",
+                                        values="Quantity", fill_value=0)
+            cos    = _cos_sim(pivot.T)
+            cosine = pd.DataFrame(cos, index=pivot.columns, columns=pivot.columns)
+            cosine.to_pickle(cosine_path)
     return scaler, kmeans, cosine
 
 rfm, monthly, country, top_p, heatmap, kpis, elbow, prods = load_data()
