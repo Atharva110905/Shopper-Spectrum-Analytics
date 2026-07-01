@@ -325,28 +325,61 @@ def load_data():
     prods   = json.load(open(DATA/"products.json"))
     return rfm, monthly, country, top_p, heatmap, kpis, elbow, prods
 
+class TopSimLookup:
+    """Lightweight wrapper around a {product: [(sim_product, score), ...]} dict
+    that mimics the small subset of pandas.DataFrame API used elsewhere in app.py:
+    .index, df[product] -> Series-like, df.loc[list, list] -> small matrix."""
+    def __init__(self, records: dict):
+        self._records = records
+        self.index = list(records.keys())
+
+    def __getitem__(self, product):
+        pairs = self._records.get(product, [])
+        return pd.Series({p: s for p, s in pairs})
+
+    def loc_matrix(self, products):
+        """Build a small dense similarity matrix for a short list of products,
+        used only for heatmaps (top 15 products)."""
+        n = len(products)
+        mat = pd.DataFrame(0.0, index=products, columns=products)
+        for p in products:
+            pairs = dict(self._records.get(p, []))
+            for q in products:
+                if q == p:
+                    mat.loc[p, q] = 1.0
+                elif q in pairs:
+                    mat.loc[p, q] = pairs[q]
+        return mat
+
+
 @st.cache_resource
 def load_models():
     from sklearn.metrics.pairwise import cosine_similarity as _cos_sim
     scaler = pickle.load(open(MODELS/"scaler.pkl","rb"))
     kmeans = pickle.load(open(MODELS/"kmeans.pkl","rb"))
 
-    cosine_path = MODELS/"cosine_sim.pkl"
-    if cosine_path.exists():
-        cosine = pd.read_pickle(cosine_path)
+    compact_path = MODELS/"top_similar.pkl"
+    full_path    = MODELS/"cosine_sim.pkl"
+
+    if compact_path.exists():
+        records = pickle.load(open(compact_path, "rb"))
+        cosine  = TopSimLookup(records)
+    elif full_path.exists():
+        cosine = pd.read_pickle(full_path)
     else:
-        # Auto-build cosine similarity matrix from raw CSV
-        with st.spinner("⚙️ Building recommendation engine (first run only — ~2 min)..."):
-            import os
-            csv_candidates = [
-                BASE / "online_retail.csv",
-                Path("online_retail.csv"),
-            ]
-            csv_path = next((p for p in csv_candidates if p.exists()), None)
-            if csv_path is None:
-                st.error("online_retail.csv not found. Please upload it to the app folder.")
+        # Auto-build: download CSV from Google Drive, compute cosine similarity
+        with st.spinner("Building recommendation engine — downloading dataset (first run only ~2 min)..."):
+            import urllib.request
+            GDRIVE_ID  = "1EznS2aHv5UcRPd3SBxH7DFQYFDpeaDwM"
+            GDRIVE_URL = f"https://drive.google.com/uc?export=download&id={GDRIVE_ID}"
+            try:
+                csv_path = BASE / "online_retail.csv"
+                if not csv_path.exists():
+                    urllib.request.urlretrieve(GDRIVE_URL, csv_path)
+                df_tmp = pd.read_csv(csv_path, encoding="latin1")
+            except Exception as dl_err:
+                st.error(f"Failed to download dataset: {dl_err}")
                 st.stop()
-            df_tmp = pd.read_csv(csv_path, encoding="latin1")
             df_tmp = df_tmp[~df_tmp["InvoiceNo"].astype(str).str.startswith("C")]
             df_tmp = df_tmp.dropna(subset=["CustomerID"])
             df_tmp = df_tmp[df_tmp["Quantity"] > 0]
@@ -355,9 +388,14 @@ def load_models():
             df_tmp["CustomerID"]  = df_tmp["CustomerID"].astype(int)
             pivot  = df_tmp.pivot_table(index="CustomerID", columns="Description",
                                         values="Quantity", fill_value=0)
-            cos    = _cos_sim(pivot.T)
-            cosine = pd.DataFrame(cos, index=pivot.columns, columns=pivot.columns)
-            cosine.to_pickle(cosine_path)
+            cos         = _cos_sim(pivot.T)
+            cosine_full = pd.DataFrame(cos, index=pivot.columns, columns=pivot.columns)
+            records = {}
+            for prod in cosine_full.index:
+                sims = cosine_full[prod].drop(prod).sort_values(ascending=False).head(20)
+                records[prod] = list(zip(sims.index, sims.values.round(4)))
+            pickle.dump(records, open(compact_path, "wb"))
+            cosine = TopSimLookup(records)
     return scaler, kmeans, cosine
 
 rfm, monthly, country, top_p, heatmap, kpis, elbow, prods = load_data()
